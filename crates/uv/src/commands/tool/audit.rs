@@ -13,14 +13,15 @@ use uv_fs::Simplified;
 use uv_normalize::{DefaultExtras, PackageName};
 use uv_preview::{Preview, PreviewFeature};
 use uv_redacted::DisplaySafeUrl;
-use uv_resolver::Lock;
 use uv_settings::{Combine, ResolverInstallerOptions};
 use uv_tool::InstalledTools;
 use uv_warnings::warn_user;
 
 use crate::commands::ExitStatus;
-use crate::commands::project::audit::{
-    AuditResults, artifact_uri, audit_lock, json, sarif, warn_unmatched_ignores,
+use crate::commands::project::{
+    ProjectError,
+    audit::{AuditResults, artifact_uri, audit_lock, json, sarif, warn_unmatched_ignores},
+    lock_target::parse_lock,
 };
 use crate::printer::Printer;
 use crate::settings::ResolverInstallerSettings;
@@ -154,9 +155,25 @@ pub(crate) async fn audit(
                 continue;
             }
         };
-        let lock: Lock = match toml::from_str(&contents) {
+        let lock = match parse_lock(&contents) {
             Ok(lock) => lock,
-            Err(error) => {
+            Err(
+                ProjectError::UnsupportedLockVersion(supported, version)
+                | ProjectError::UnparsableLockVersion(supported, version, _),
+            ) => {
+                if explicit_tool {
+                    bail!(
+                        "The lockfile for tool `{name}` at `{}` uses an unsupported schema version (v{version}, but only v{supported} is supported)",
+                        lock_path.user_display()
+                    );
+                }
+                warn_user!(
+                    "Skipping tool `{name}` because its lockfile at `{}` uses an unsupported schema version (v{version}, but only v{supported} is supported)",
+                    lock_path.user_display()
+                );
+                continue;
+            }
+            Err(ProjectError::UvLockParse(error)) => {
                 if explicit_tool {
                     bail!(
                         "Failed to parse the lockfile for tool `{name}` at `{}`: {error}",
@@ -169,6 +186,7 @@ pub(crate) async fn audit(
                 );
                 continue;
             }
+            Err(error) => return Err(error.into()),
         };
 
         let settings = ResolverInstallerSettings::from(
